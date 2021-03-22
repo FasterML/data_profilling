@@ -1,5 +1,9 @@
 from collections import OrderedDict
-
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import DBSCAN
+from sklearn.covariance import EllipticEnvelope
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn import svm
 import numpy as np
 import pandas as pd
 from pandas.api import types
@@ -21,7 +25,6 @@ class Profiling(object):
     def __init__(self, df, plot=False):
         self.df = df
         self.length = len(df)
-        self.columns_stats = self._get_stats()
         self.corr = df.corr()
         self.plot = plot
 
@@ -57,8 +60,8 @@ class Profiling(object):
     def columns_types(self):
         return pd.value_counts(self.columns_stats.loc['types'])
 
-    def summary(self):
-        return pd.concat([self.df.describe(), self.columns_stats], sort=True)[self.df.columns]
+    def summary(self, outlier, correlation):
+        return pd.concat([self.df.describe(), self._get_stats(outlier, correlation)], sort=True)[self.df.columns]
 
     @staticmethod
     def _number_format(x):
@@ -76,12 +79,18 @@ class Profiling(object):
             raise ValueError('{} is not a valid column'.format(column))
         return column in self.df.columns
 
-    def _get_stats(self):
+    def _get_stats(self, outlier, correlation):
         counts = self.df.count()
         counts.name = 'counts'
         uniques = self._get_uniques()
         missing = self._get_missing(counts)
-        stats = pd.concat([counts, uniques, missing], axis=1, sort=True)
+        skew = self._get_skew()
+        kurt = self._get_kurt()
+        outlier = self._get_outlier(outlier)
+        correlation = self._get_correlations(correlation)
+
+        # stats = pd.concat([counts, uniques, missing, skew, kurt, correlation], axis=1, sort=True)
+        stats = pd.concat([counts, uniques, missing, skew, kurt, outlier, correlation], axis=1, sort=True)
 
         # settings types
         stats['types'] = ''
@@ -89,6 +98,46 @@ class Profiling(object):
         for ctype, columns in columns_info.items():
             stats.loc[columns, 'types'] = ctype
         return stats.transpose()[self.df.columns]
+
+    def _get_correlations(self, method):
+        if self.df[self.df.columns[-1]].dtype != 'object':
+            return pd.Series(dict(self.df.corr(method=method)[self.df.columns[-1]]), name='correlation')
+
+    def _get_outlier(self, method):
+        outrate = {}
+        for c in self.df.columns:
+            if self.df[c].dtype != 'object':
+                if method == 'z_score':
+                    count = 0
+                    z_score = (np.array(self.df[c]) - np.mean(self.df[c])) / np.std(self.df[c])
+                    for z in np.abs(z_score):
+                        # print (z)
+                        if z > 3:
+                            count += 1
+                    outrate[c] = str(round(count / self.df[c].count() * 100, 2)) + '%'
+
+                elif method == 'isolationforest':
+                    iso = IsolationForest(behaviour='new', random_state=22, contamination=0.1)
+                    preds = iso.fit_predict(self.df[c].values.reshape(-1, 1))
+                    data = pd.DataFrame()
+                    data['cluster'] = preds
+                    outrate[c] = '{:.2f}%'.format(data['cluster'].value_counts()[-1] / len(self.df[c].values) * 100)
+
+                elif method == 'rbc':
+                    rbc = EllipticEnvelope(contamination=0.1)
+                    preds = rbc.fit_predict(self.df[c].values.reshape(-1, 1))
+                    data = pd.DataFrame()
+                    data['cluster'] = preds
+                    outrate[c] = '{:.2f}%'.format(data['cluster'].value_counts()[-1] / len(self.df[c].values) * 100)
+
+                elif method == 'ocsvm':
+                    ocsvm = svm.OneClassSVM(nu=0.1, kernel="rbf", gamma=0.1)
+                    preds = ocsvm.fit_predict(self.df[c].values.reshape(-1, 1))
+                    data = pd.DataFrame()
+                    data['cluster'] = preds
+                    outrate[c] = '{:.2f}%'.format(data['cluster'].value_counts()[-1] / len(self.df[c].values) * 100)
+
+        return (pd.Series(outrate, name='outlier'))
 
     def _get_uniques(self):
         return pd.Series(dict((c, self.df[c].nunique()) for c in self.df.columns), name='uniques')
@@ -99,6 +148,16 @@ class Profiling(object):
         perc = (count / self.length).apply(self._percent)
         perc.name = 'missing_perc'
         return pd.concat([count, perc], axis=1, sort=True)
+
+    def _get_skew(self):
+        skew = self.df.skew()
+        skew.name = 'skew'
+        return skew
+
+    def _get_kurt(self):
+        kurt = self.df.kurt()
+        kurt.name = 'kurtosis'
+        return kurt
 
     def _get_columns_info(self, stats):
         column_info = {}
@@ -195,6 +254,7 @@ class Profiling(object):
         stats['deviating_of_median'] = deviating_of_median
         stats['deviating_of_median_perc'] = deviating_of_median_perc
         stats['top_correlations'] = self._get_top_correlations(column)
+
         return pd.concat([pd.Series(stats, name=column),
                           self.columns_stats[column]],
                          sort=True)
@@ -308,18 +368,11 @@ class Profiling(object):
         return columns_included.intersection(df.columns)
 
 
-def main():
-    iris = pd.read_csv('https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv')
-    profiling = Profiling(iris)
-    print(profiling.summary())
-    # _logger.info("Script ends here")
-
-
-def run():
+def run(data_path, outlier='z_score', correlation='pearson'):
     """Entry point for console_scripts
     """
-    main()
+    data = pd.read_csv(data_path, sep=',')
+    profiling = Profiling(data)
 
+    print(profiling.summary(outlier=outlier, correlation=correlation))
 
-if __name__ == "__main__":
-    run()
